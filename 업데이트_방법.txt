@@ -1,0 +1,19 @@
+# GitHub 교체 업로드 방법
+
+지금 GitHub 저장소에 아래 파일 3개를 덮어쓰기 업로드하세요.
+
+- app.py
+- sample_localpay_data.csv
+- README.md
+
+가장 쉬운 방법:
+
+1. GitHub 저장소 `localpay-ai-analyst`로 이동
+2. `Add file` 클릭
+3. `Upload files` 클릭
+4. 이 폴더 안의 파일들을 드래그해서 업로드
+5. `Commit changes` 클릭
+6. Streamlit 앱은 보통 1~3분 뒤 자동 업데이트됩니다.
+
+업데이트 후 앱 첫 화면에서 기본 데이터가 바로 실제 수원시 지역화폐 결제정보로 표시됩니다.
+더 이상 Streamlit 앱에서 수원 CSV를 따로 업로드하지 않아도 됩니다.
