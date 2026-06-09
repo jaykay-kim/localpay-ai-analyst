@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
-import anthropic
-import os
 
 st.set_page_config(page_title="AI 창업 상권분석 플랫폼", page_icon="🏪", layout="wide")
 
@@ -79,35 +77,62 @@ def get_data(api_key, sido):
     return df, len(df), "📋 실데이터 샘플 (소상공인시장진흥공단 2026.03 파일데이터 기반)"
 
 def generate_ai_analysis(summary):
-    try:
-        client = anthropic.Anthropic()
-        prompt = f"""당신은 소상공인 창업을 돕는 AI 상권분석 전문가입니다.
-아래 실제 공공데이터(소상공인시장진흥공단 상가정보) 기반 분석 결과를 바탕으로
-창업 희망자에게 유용한 리포트를 작성해주세요.
+    region = summary["region"]
+    industry = summary["industry"]
+    total = summary["total_stores"]
+    target = summary["target_stores"]
+    conc = summary["concentration"]
+    top_d = summary["top_districts"]
+    diversity = summary["industry_diversity"]
 
-[분석 데이터]
-- 지역: {summary['region']}
-- 관심 업종: {summary['industry']}
-- 전체 상가 수: {summary['total_stores']:,}개
-- 해당 업종 점포 수: {summary['target_stores']:,}개
-- 업종 집중도: {summary['concentration']:.1f}%
-- 밀집 행정동 TOP5: {summary['top_districts']}
-- 업종 다양성: {summary['industry_diversity']}개 중분류
+    # 경쟁강도 판단
+    if conc >= 5:
+        competition = "**매우 높음** 🔴"
+        comp_comment = f"{region} 내 {industry} 업종은 전체 상가의 {conc:.1f}%를 차지하며 경쟁이 치열한 상태입니다."
+    elif conc >= 3:
+        competition = "**높음** 🟠"
+        comp_comment = f"{region} 내 {industry} 업종은 전체 상가의 {conc:.1f}%로 경쟁 밀도가 높은 편입니다."
+    elif conc >= 1:
+        competition = "**보통** 🟡"
+        comp_comment = f"{region} 내 {industry} 업종은 전체 상가의 {conc:.1f}%로 적정 수준의 경쟁이 형성되어 있습니다."
+    else:
+        competition = "**낮음** 🟢"
+        comp_comment = f"{region} 내 {industry} 업종은 전체 상가의 {conc:.1f}%로 상대적으로 블루오션에 가깝습니다."
 
-다음 항목으로 마크다운 리포트를 작성해주세요:
-1. **시장 현황 요약** — 경쟁 강도 평가
-2. **유망 입지 추천** — 과포화 vs 블루오션 행정동
-3. **창업 리스크 요인** — 주의사항
-4. **AI 종합 의견** — 한 줄 결론"""
-        msg = client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return msg.content[0].text
-    except anthropic.AuthenticationError:
-        return "⚠️ Anthropic API 키를 확인해주세요."
-    except Exception as e:
-        return f"⚠️ AI 분석 오류: {str(e)}"
+    # 밀집 행정동 파싱
+    top_dong_list = [d.split("(")[0] for d in top_d.split(", ") if "(" in d][:3]
+    top_dong_str = ", ".join(top_dong_list) if top_dong_list else "정보 없음"
+
+    # 업종 다양성 판단
+    if diversity >= 60:
+        diversity_comment = f"업종 다양성이 {diversity}개 중분류로 매우 높아 상권이 활성화되어 있습니다."
+    elif diversity >= 40:
+        diversity_comment = f"업종 다양성이 {diversity}개 중분류로 다양한 업종이 공존하는 상권입니다."
+    else:
+        diversity_comment = f"업종 다양성이 {diversity}개 중분류로 특정 업종 중심의 상권입니다."
+
+    report = f"""
+#### 1. 시장 현황 요약
+{comp_comment} 총 {total:,}개 상가 중 {industry} 점포는 {target:,}개로 집계됩니다. {diversity_comment}
+
+#### 2. 유망 입지 추천
+밀집도 상위 행정동은 **{top_d}** 순으로 나타났습니다.
+- **과포화 주의 지역**: {top_dong_str} — 이미 경쟁 점포가 집중된 지역으로 신규 진입 시 차별화 전략이 필요합니다.
+- **블루오션 탐색 방향**: 밀집도 하위 행정동이나 인근 주거 밀집 지역을 중심으로 수요 대비 공급이 적은 입지를 탐색하세요.
+
+#### 3. 창업 리스크 요인
+- 본 데이터는 **점포 수 기반** 분석으로 실제 매출·임대료·유동인구는 반영되지 않습니다.
+- 상위 밀집 행정동은 이미 경쟁이 포화 상태일 수 있어 **현장 방문 조사**가 필수입니다.
+- 업종 특성상 인허가·위생 규정 등 추가 검토가 필요할 수 있습니다.
+- 창업 전 소상공인시장진흥공단 [상권정보시스템(sg.sbiz.or.kr)](https://sg.sbiz.or.kr) 병행 활용을 권장합니다.
+
+#### 4. AI 종합 의견
+> {region} {industry} 시장은 경쟁강도 {competition} 수준입니다. 밀집 지역을 피하고 유동인구·임대료·접근성을 종합 고려한 입지 선정이 성공의 핵심입니다.
+
+---
+*본 분석은 소상공인시장진흥공단 2026년 3월 상가정보 실데이터 기반이며, 최종 창업 결정 시 전문가 상담을 병행하시기 바랍니다.*
+"""
+    return report
 
 # ── session_state 초기화 ──────────────────────────────
 if "analyzed" not in st.session_state:
@@ -144,9 +169,7 @@ st.markdown("""
 with st.sidebar:
     st.header("⚙️ 설정")
     pub_api_key = st.text_input("공공데이터포털 API 키 (선택)", type="password", placeholder="없으면 실데이터 샘플로 동작")
-    anthropic_key = st.text_input("Anthropic API 키 (AI 분석용)", type="password", placeholder="sk-ant-...")
-    if anthropic_key:
-        os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+
 
     st.divider()
     st.header("🔍 분석 조건")
