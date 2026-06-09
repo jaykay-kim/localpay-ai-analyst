@@ -40,6 +40,10 @@ st.markdown("""
     background: #fffbeb; border-left: 6px solid #f59e0b;
     border-radius: 14px; padding: 18px 20px; margin: 10px 0; line-height: 1.75;
 }
+.risk-card {
+    background: #fef2f2; border-left: 6px solid #ef4444;
+    border-radius: 14px; padding: 18px 20px; margin: 10px 0; line-height: 1.75;
+}
 .small-note {font-size: 13px; color: #64748b;}
 </style>
 """, unsafe_allow_html=True)
@@ -58,7 +62,7 @@ def load_stores():
 def format_won(value):
     try:
         value = float(value)
-    except Exception:
+    except:
         return "-"
     if value >= 100_000_000:
         return f"{value/100_000_000:.1f}억 원"
@@ -73,6 +77,9 @@ def normalize(s):
     if s.max() == s.min():
         return pd.Series([50] * len(s), index=s.index)
     return (s - s.min()) / (s.max() - s.min()) * 100
+
+def safe_cols(df, cols):
+    return [c for c in cols if c in df.columns]
 
 def calc_industry_scores(pay_df, store_df):
     p = pay_df.groupby("industry", as_index=False).agg(
@@ -214,7 +221,29 @@ def simple_explanatory_model(pay_df):
     except Exception:
         return None
 
-def make_user_report(pay_df, stores, region, district, selected_industry, industry_score, district_score, target_score, matrix_df):
+def get_district_view(base_payments, selected_region, selected_district, store_df):
+    """지역·입지 분석용 비교표. 동을 하나 선택해도 같은 구 내 동들을 같이 보여 UI가 빈약해지지 않도록 함."""
+    if selected_region != "전체":
+        scope = base_payments[base_payments["region"].astype(str) == selected_region].copy()
+        scope_label = selected_region
+    else:
+        scope = base_payments.copy()
+        scope_label = "수원시 전체"
+
+    scores = calc_district_scores(scope, store_df)
+    if selected_district != "전체":
+        scores["선택지역"] = np.where(scores["district"] == selected_district, "선택 지역", "비교 지역")
+        # 선택 동 + 상위 지역을 함께 보여줌
+        selected_row = scores[scores["district"] == selected_district]
+        top_rows = scores.head(9)
+        scores_view = pd.concat([selected_row, top_rows], ignore_index=True).drop_duplicates(subset=["district"])
+        scores_view = scores_view.sort_values("상권투자점수", ascending=False)
+    else:
+        scores["선택지역"] = "비교 지역"
+        scores_view = scores.head(12)
+    return scores, scores_view, scope_label
+
+def make_user_report(pay_df, store_df, region, district, selected_industry, industry_score, district_score, target_score, matrix_df, model_result):
     total_pay = pay_df["payment_amount"].sum()
     total_txn = pay_df["transaction_count"].sum()
     avg_ticket = total_pay / max(total_txn, 1)
@@ -226,39 +255,69 @@ def make_user_report(pay_df, stores, region, district, selected_industry, indust
 
     top_ind = industry_score.iloc[0] if not industry_score.empty else None
     top_dist = district_score.iloc[0] if not district_score.empty else None
-    top_target = target_score.iloc[0] if not target_score.empty else None
+    top_targets = target_score.head(3) if not target_score.empty else pd.DataFrame()
     priority = matrix_df[matrix_df["전략분류"] == "우선 검토"].head(3)["industry"].tolist() if not matrix_df.empty else []
     caution = matrix_df[matrix_df["전략분류"].isin(["수요 높지만 경쟁 주의", "보류/추가조사"])].head(3)["industry"].tolist() if not matrix_df.empty else []
 
     area = region if district == "전체" else f"{region} {district}"
 
-    target_sentence = ""
-    if top_target is not None:
-        target_sentence = f"관심 업종 **{selected_industry}** 기준으로는 **{top_target['district']}**가 1차 검토 지역입니다. 결제금액은 **{format_won(top_target['결제금액'])}**, 평균 객단가는 **{format_won(top_target['평균객단가'])}**입니다."
+    top_target_sentence = ""
+    if not top_targets.empty:
+        parts = []
+        for rank, (_, row) in enumerate(top_targets.iterrows(), start=1):
+            parts.append(f"{rank}. **{row['district']}**(입지검토점수 {row['입지검토점수']}점, 결제금액 {format_won(row['결제금액'])})")
+        top_target_sentence = "<br>".join(parts)
     else:
-        target_sentence = f"선택 업종 **{selected_industry}**은 현재 조건에서 상세 입지 비교 데이터가 부족합니다."
+        top_target_sentence = "선택 업종에 대한 입지 비교 데이터가 부족합니다."
+
+    r2_text = "선택 조건의 데이터가 적어 설명적 회귀분석은 생략했습니다."
+    coef_text = ""
+    if model_result is not None:
+        r2, coef = model_result
+        top_coef = coef[coef["변수"] != "상수"].head(3)
+        coef_items = ", ".join([f"{r['변수']}({r['계수']:.2f})" for _, r in top_coef.iterrows()])
+        r2_text = f"설명적 회귀분석 결과, 로그 결제금액에 대한 모형 설명력 R²는 **{r2:.3f}**입니다."
+        coef_text = f"영향력이 크게 나타난 변수는 **{coef_items}**입니다. 이 분석은 예측이 아니라 결제금액 차이를 설명하기 위한 기술적 분석입니다."
 
     return f"""
-### AI 창업 분석 리포트: {area}
+### AI 창업/투자 리포트: {area}
 
-#### 1. 선택 조건 요약
-선택한 지역의 총 결제금액은 **{format_won(total_pay)}**, 결제건수는 **{total_txn:,.0f}건**, 평균 객단가는 **{format_won(avg_ticket)}**입니다. 주요 소비층은 **{top_age} / {top_gender}**입니다.
+#### 1. Executive Summary
+선택 지역의 총 결제금액은 **{format_won(total_pay)}**, 결제건수는 **{total_txn:,.0f}건**, 평균 객단가는 **{format_won(avg_ticket)}**입니다. 주요 소비층은 **{top_age} / {top_gender}**입니다.
 
-#### 2. 추천 업종
-전체 업종 기준으로는 **{top_ind['industry'] if top_ind is not None else '확인 불가'}**의 창업투자점수가 가장 높습니다.  
+#### 2. Recommended Industry
+전체 업종 기준 창업투자점수 1위는 **{top_ind['industry'] if top_ind is not None else '확인 불가'}**입니다.  
 수요-경쟁 기준 우선 검토 업종은 **{', '.join(priority) if priority else '추가 데이터 확인 필요'}**입니다.
 
-#### 3. 추천 지역
-행정동 기준으로는 **{top_dist['district'] if top_dist is not None else '확인 불가'}**의 상권투자점수가 가장 높습니다.  
-{target_sentence}
+#### 3. Recommended Location for Selected Industry
+관심 업종 **{selected_industry}** 기준 추천 입지 TOP 3는 다음과 같습니다.<br>
+{top_target_sentence}
 
-#### 4. 주의 업종
-주의가 필요한 업종은 **{', '.join(caution) if caution else '추가 데이터 확인 필요'}**입니다. 이 업종들은 수요가 높더라도 경쟁이 강하거나, 수요 자체가 낮아 추가 조사가 필요할 수 있습니다.
+#### 4. Risk Check
+주의가 필요한 업종은 **{', '.join(caution) if caution else '추가 데이터 확인 필요'}**입니다.  
+이 업종들은 결제수요가 높더라도 점포 수가 많아 경쟁이 강하거나, 반대로 수요 검증이 부족할 수 있습니다.
 
-#### 5. 추가 확인사항
-실제 창업 전에는 임대료, 유동인구, 배달권역, 인건비, 원가율, 마진율, 실제 경쟁점포의 품질을 추가 확인해야 합니다.
+#### 5. Applied Analysis Methods
+본 리포트는 다음 분석을 결합했습니다.
 
-#### 6. 최종 한 줄 판단
+- **Demand analysis**: 업종별 결제금액, 결제건수, 평균 객단가 분석
+- **Customer segmentation**: 연령대·성별 결제금액 비교
+- **Competition proxy**: 수원시 상가정보의 업종별·행정동별 점포 수를 경쟁강도 대리변수로 활용
+- **Scoring model**: 결제금액, 결제건수, 객단가, 고객확장성, 지역확산성, 경쟁완화 점수 결합
+- **Demand-competition matrix**: 수요점수와 경쟁점수를 기준으로 우선검토/경쟁주의/니치가능성/보류 업종 분류
+- **Explanatory regression**: 결제건수, 객단가, 연령대 변수가 결제금액 차이를 어떻게 설명하는지 확인
+
+#### 6. Explanatory Regression Result
+{r2_text}  
+{coef_text}
+
+#### 7. Next Action
+1. 추천 업종 TOP3와 관심 업종 TOP3 입지를 비교합니다.  
+2. 결제수요가 높은 지역이라도 상가점포 수가 많으면 임대료와 경쟁점포 수준을 추가 확인합니다.  
+3. 주요 소비 연령대에 맞춰 가격대, 메뉴/서비스, 홍보 채널을 설계합니다.  
+4. 최종 창업 전에는 유동인구, 임대료, 원가율, 마진율, 배달권역을 현장 조사로 검증해야 합니다.
+
+#### 8. Final Decision Guide
 현재 데이터 기준으로는 **결제수요가 크고 경쟁강도가 과도하지 않은 업종·행정동 조합을 1차 후보로 좁힌 뒤, 현장조사로 최종 검증하는 전략**이 적합합니다.
 """
 
@@ -275,7 +334,7 @@ st.markdown("""
 <span class="data-badge">수원시 지역화폐 결제정보</span>
 <span class="data-badge">수원시 상가정보</span>
 <span class="data-badge">업종·입지 추천</span>
-<span class="data-badge">AI 창업 리포트</span>
+<span class="data-badge">AI 창업/투자 리포트</span>
 """, unsafe_allow_html=True)
 
 payments = load_payments()
@@ -328,7 +387,7 @@ with st.sidebar:
 
     st.divider()
     st.caption("데이터: 2025년 11월 수원시 지역화폐 결제정보")
-    st.caption("정제 후 정상 결제 데이터 기준")
+    st.caption("이상값 1건 제거 후 정상 결제 데이터 기준")
 
 filtered = payments.copy()
 if region != "전체":
@@ -348,6 +407,7 @@ industry_score = calc_industry_scores(filtered, stores_filtered)
 district_score = calc_district_scores(filtered, stores)
 target_score = calc_target_industry_location(filtered, stores, selected_industry)
 matrix_df = demand_competition_matrix(industry_score)
+model_result = simple_explanatory_model(filtered)
 
 if not analyze_btn:
     st.markdown("""
@@ -374,7 +434,7 @@ s3.metric("선택 지역 객단가", format_won(selected_avg_ticket))
 s4.metric("선택 지역 업종 수", f"{filtered['industry'].nunique():,}개")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "✅ 추천 요약", "🏪 업종 유망도", "📍 지역·입지 분석", "🔎 관심 업종 상세", "👥 고객층 분석", "🤖 AI 창업 리포트"
+    "✅ 추천 요약", "🏪 업종 유망도", "📍 지역·입지 분석", "🔎 관심 업종 상세", "👥 고객층 분석", "🤖 AI 창업/투자 리포트"
 ])
 
 with tab1:
@@ -392,10 +452,7 @@ with tab1:
         txt = "<br>".join([f"{rank}. {r['district']} ({r['상권투자점수']}점)" for rank, (_, r) in enumerate(top_districts.iterrows(), start=1)])
         st.markdown(f'<div class="result-card"><b>추천 행정동 TOP 3</b><br>{txt}</div>', unsafe_allow_html=True)
     with c3:
-        if not priority.empty:
-            txt = "<br>".join([f"{rank}. {r['industry']} ({r['전략분류']})" for rank, (_, r) in enumerate(priority.iterrows(), start=1)])
-        else:
-            txt = "추가 데이터 확인 필요"
+        txt = "<br>".join([f"{rank}. {r['industry']} ({r['전략분류']})" for rank, (_, r) in enumerate(priority.iterrows(), start=1)]) if not priority.empty else "추가 데이터 확인 필요"
         st.markdown(f'<div class="good-card"><b>수요-경쟁 우선 검토</b><br>{txt}</div>', unsafe_allow_html=True)
 
     st.markdown("### 주의해야 할 업종")
@@ -407,30 +464,44 @@ with tab1:
 with tab2:
     st.markdown("### 업종 유망도 분석")
     st.caption("결제금액, 결제건수, 평균 객단가, 고객층 다양성, 지역 확산성, 경쟁완화 점수를 종합했습니다.")
-    fig = px.bar(industry_score.head(15), x="창업투자점수", y="industry", orientation="h", text="창업투자점수", color="창업투자점수", color_continuous_scale="Greens")
+    fig = px.bar(industry_score.head(15), x="창업투자점수", y="industry", orientation="h",
+                 text="창업투자점수", color="창업투자점수", color_continuous_scale="Greens")
     fig.update_traces(textposition="outside")
     fig.update_layout(yaxis=dict(autorange="reversed"), height=520, coloraxis_showscale=False, plot_bgcolor="white")
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(industry_score, use_container_width=True)
 
     st.markdown("### 수요-경쟁 매트릭스")
-    st.caption("왼쪽 위는 수요가 높고 경쟁이 상대적으로 낮아 우선 검토할 수 있습니다.")
-    fig_m = px.scatter(matrix_df, x="경쟁점수", y="수요점수", size="결제금액", color="전략분류", hover_name="industry", hover_data=["결제금액", "결제건수", "상가점포수", "창업투자점수"], height=520)
+    fig_m = px.scatter(matrix_df, x="경쟁점수", y="수요점수", size="결제금액", color="전략분류", hover_name="industry",
+                       hover_data=["결제금액", "결제건수", "상가점포수", "창업투자점수"], height=520)
     fig_m.update_layout(plot_bgcolor="white", xaxis_title="경쟁점수(상가점포수 기반)", yaxis_title="수요점수(결제금액 기반)")
     st.plotly_chart(fig_m, use_container_width=True)
 
 with tab3:
     st.markdown("### 지역·입지 분석")
-    dpay = filtered.groupby("district", as_index=False).agg(결제금액=("payment_amount","sum"), 결제건수=("transaction_count","sum"), 평균객단가=("avg_ticket","mean")).sort_values("결제금액", ascending=False)
-    dpay["평균객단가"] = dpay["평균객단가"].round(0)
+    all_district_scores, district_view, scope_label = get_district_view(payments, region, district, stores)
+    if district != "전체":
+        st.caption(f"현재 선택한 {district}만 단독으로 보여주면 비교가 어려워, {scope_label} 내 주요 행정동과 함께 비교합니다.")
+    else:
+        st.caption(f"{scope_label} 기준으로 결제규모와 상권투자점수가 높은 행정동을 비교합니다.")
 
-    fig = px.bar(dpay, x="결제금액", y="district", orientation="h", text="결제금액", color="결제금액", color_continuous_scale="Blues")
-    fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-    fig.update_layout(yaxis=dict(autorange="reversed"), height=520, coloraxis_showscale=False, plot_bgcolor="white")
-    st.plotly_chart(fig, use_container_width=True)
+    c1, c2 = st.columns([1.3, 1])
+    with c1:
+        fig_d = px.bar(district_view, x="상권투자점수", y="district", orientation="h",
+                       text="상권투자점수", color="선택지역", hover_data=["결제금액", "결제건수", "평균객단가", "상가점포수"])
+        fig_d.update_traces(textposition="outside")
+        fig_d.update_layout(yaxis=dict(autorange="reversed"), height=520, plot_bgcolor="white", xaxis_title="상권투자점수", yaxis_title="행정동")
+        st.plotly_chart(fig_d, use_container_width=True)
 
-    st.markdown("### 행정동별 상권투자점수")
-    st.dataframe(district_score, use_container_width=True)
+    with c2:
+        fig_sc = px.scatter(all_district_scores, x="상가점포수", y="결제금액", size="결제건수",
+                            hover_name="district", color="상권투자점수", color_continuous_scale="Blues",
+                            height=520)
+        fig_sc.update_layout(plot_bgcolor="white", xaxis_title="상가점포 수", yaxis_title="결제금액")
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+    st.markdown("### 행정동별 상세표")
+    st.dataframe(all_district_scores, use_container_width=True)
 
 with tab4:
     st.markdown(f"### 관심 업종 상세분석: {selected_industry}")
@@ -446,13 +517,32 @@ with tab4:
         c2.metric("관심 업종 결제건수", f"{tt:,.0f}건")
         c3.metric("관심 업종 객단가", format_won(ta))
 
-        st.markdown("### 관심 업종 기준 추천 입지")
-        if not target_score.empty:
-            fig_t = px.bar(target_score.head(10), x="입지검토점수", y="district", orientation="h", text="입지검토점수", color="입지검토점수", color_continuous_scale="Teal")
+        st.markdown("### 추천 입지 TOP 3")
+        top3 = target_score.head(3)
+        if not top3.empty:
+            cols = st.columns(3)
+            for idx, ((_, row), col) in enumerate(zip(top3.iterrows(), cols), start=1):
+                with col:
+                    st.markdown(
+                        f"""<div class="result-card">
+                        <b>{idx}. {row['district']}</b><br>
+                        입지검토점수: <b>{row['입지검토점수']}점</b><br>
+                        결제금액: {format_won(row['결제금액'])}<br>
+                        결제건수: {row['결제건수']:,.0f}건<br>
+                        평균 객단가: {format_won(row['평균객단가'])}<br>
+                        관심업종 점포수: {row['관심업종점포수']:,.0f}개
+                        </div>""",
+                        unsafe_allow_html=True
+                    )
+
+            fig_t = px.bar(top3.sort_values("입지검토점수", ascending=True), x="입지검토점수", y="district", orientation="h",
+                           text="입지검토점수", color="입지검토점수", color_continuous_scale="Teal")
             fig_t.update_traces(textposition="outside")
-            fig_t.update_layout(yaxis=dict(autorange="reversed"), height=460, coloraxis_showscale=False, plot_bgcolor="white")
+            fig_t.update_layout(height=330, coloraxis_showscale=False, plot_bgcolor="white", xaxis_title="입지검토점수", yaxis_title="추천 입지")
             st.plotly_chart(fig_t, use_container_width=True)
-            st.dataframe(target_score, use_container_width=True)
+
+        st.markdown("### 관심 업종 전체 입지 비교")
+        st.dataframe(target_score, use_container_width=True)
 
         st.markdown("### 관심 업종의 연령대별 결제금액")
         age_t = target_data.groupby("age_group", as_index=False)["payment_amount"].sum().sort_values("payment_amount", ascending=False)
@@ -483,18 +573,23 @@ with tab5:
     fig_heat.update_layout(height=520, xaxis_tickangle=-40, plot_bgcolor="white")
     st.plotly_chart(fig_heat, use_container_width=True)
 
-    st.markdown("### 설명적 분석")
-    st.caption("결제금액 차이를 설명하는 요인을 확인하는 기술적 분석입니다. 예측 모델이 아니라 데이터 해석 보조입니다.")
-    model_result = simple_explanatory_model(filtered)
+with tab6:
+    st.markdown("### AI 창업/투자 리포트")
+    report = make_user_report(filtered, stores, region, district, selected_industry, industry_score, district_score, target_score, matrix_df, model_result)
+    st.markdown(f'<div class="result-card">{report}</div>', unsafe_allow_html=True)
+
+    st.markdown("### 적용 분석기법 요약")
+    tech_cols = st.columns(3)
+    with tech_cols[0]:
+        st.markdown('<div class="guide-box"><b>Scoring Model</b><br>결제금액, 결제건수, 객단가, 고객확장성, 지역확산성, 경쟁완화 점수를 결합해 창업투자점수를 산출합니다.</div>', unsafe_allow_html=True)
+    with tech_cols[1]:
+        st.markdown('<div class="guide-box"><b>Demand-Competition Matrix</b><br>지역화폐 결제금액을 수요 대리변수로, 상가점포수를 경쟁강도 대리변수로 사용해 업종을 분류합니다.</div>', unsafe_allow_html=True)
+    with tech_cols[2]:
+        st.markdown('<div class="guide-box"><b>Explanatory Regression</b><br>결제건수, 객단가, 연령대가 결제금액 차이를 어떻게 설명하는지 확인합니다. 예측이 아닌 설명 목적입니다.</div>', unsafe_allow_html=True)
+
     if model_result is not None:
         r2, coef = model_result
-        st.metric("설명력 R²", f"{r2:.3f}")
+        st.metric("설명적 회귀분석 R²", f"{r2:.3f}")
         st.dataframe(coef, use_container_width=True)
-    else:
-        st.info("선택 조건의 데이터가 적어 설명적 분석을 수행하지 않았습니다.")
 
-with tab6:
-    st.markdown("### AI 창업 리포트")
-    report = make_user_report(filtered, stores, region, district, selected_industry, industry_score, district_score, target_score, matrix_df)
-    st.markdown(f'<div class="result-card">{report}</div>', unsafe_allow_html=True)
-    st.download_button("리포트 다운로드", data=report, file_name="localpay_ai_startup_report.md", mime="text/markdown")
+    st.download_button("리포트 다운로드", data=report, file_name="localpay_ai_investment_report.md", mime="text/markdown")
