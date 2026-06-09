@@ -2,131 +2,144 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import anthropic
+import os
 import json
 
 st.set_page_config(
-    page_title="LocalPay AI Analyst",
-    page_icon="💳",
+    page_title="AI 창업 상권분석 플랫폼",
+    page_icon="🏪",
     layout="wide"
 )
 
-# ── 스타일 ──────────────────────────────────────────────
 st.markdown("""
 <style>
-.metric-card {
-    background: #f8f9fa;
-    border-radius: 12px;
-    padding: 16px 20px;
-    border-left: 4px solid #1a73e8;
+.main-header {
+    background: linear-gradient(135deg, #1a73e8 0%, #0d47a1 100%);
+    color: white;
+    padding: 24px 28px;
+    border-radius: 14px;
+    margin-bottom: 24px;
 }
-.report-box {
+.data-badge {
+    display: inline-block;
+    background: #e8f0fe;
+    color: #1a73e8;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    margin: 2px;
+}
+.insight-box {
     background: #f0f4ff;
-    border-radius: 12px;
-    padding: 20px 24px;
-    border: 1px solid #c5d3f7;
+    border-left: 4px solid #1a73e8;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 8px 0;
     line-height: 1.8;
 }
-h1 { color: #1a1a2e; }
 </style>
 """, unsafe_allow_html=True)
 
 # ── 상수 ────────────────────────────────────────────────
-SUWON_MERCHANT_TOTAL = 37369
+SIDO_CODES = {
+    "서울특별시": "11", "부산광역시": "26", "대구광역시": "27",
+    "인천광역시": "28", "광주광역시": "29", "대전광역시": "30",
+    "울산광역시": "31", "세종특별자치시": "36", "경기도": "41",
+    "강원특별자치도": "51", "충청북도": "43", "충청남도": "44",
+    "전북특별자치도": "52", "전라남도": "46", "경상북도": "47",
+    "경상남도": "48", "제주특별자치도": "50"
+}
 
-# 실제 업종이 아닌 오염 데이터 제거용 필터
-VALID_INDUSTRIES = [
-    "가구", "건축자재", "광교1동 제외 기타", "기타유통", "기타의료",
-    "대형유통", "레저/문화 용품", "레저/스포츠 서비스", "문화/취미",
-    "미분류", "미용/위생", "병원", "비영리유통", "사무/통신",
-    "서적/문구/학습자재", "숙박업", "신변잡화", "약국", "용역서비스",
-    "음료/식품", "의류", "의원", "일반/휴게 음식", "일반유통",
-    "자동차 정비/유지", "자동차판매", "전자상거래", "전자제품",
-    "주방용품", "주유/충전소", "직물/침구류", "학교/교육", "학원",
-    "회원정보미상"
-]
+INDUSTRY_MAP = {
+    "한식": "Q12A01", "중식": "Q12A02", "일식": "Q12A03", "양식": "Q12A04",
+    "카페/커피": "Q12A05", "패스트푸드": "Q12A06", "치킨": "Q12A07",
+    "분식": "Q12A08", "편의점": "Q15A01", "슈퍼마켓": "Q15A02",
+    "약국": "Q14A01", "의류": "Q13A01", "미용실": "Q11A01",
+    "네일숍": "Q11A02", "세탁소": "Q11A03", "학원(보습)": "Q10A01",
+    "헬스장/PT": "Q10A02", "부동산": "Q16A01", "인테리어": "Q16A02"
+}
 
-REQUIRED_COLUMNS = [
-    "month", "region", "district", "industry", "age_group",
-    "payment_amount", "transaction_count", "avg_ticket"
-]
+# ── API 호출 함수 ────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_store_data(api_key: str, sido_cd: str, inds_lrg_cd: str = None, page_no: int = 1, num_rows: int = 1000):
+    """소상공인시장진흥공단 상가(상권)정보 API"""
+    url = "https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInAdmi"
+    params = {
+        "serviceKey": api_key,
+        "pageNo": page_no,
+        "numOfRows": num_rows,
+        "divId": "ctprvnCd",
+        "key": sido_cd,
+        "type": "json"
+    }
+    if inds_lrg_cd:
+        params["indsLrgCd"] = inds_lrg_cd
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        data = resp.json()
+        body = data.get("body", {})
+        items = body.get("items", [])
+        total = body.get("totalCount", 0)
+        return pd.DataFrame(items) if items else pd.DataFrame(), total
+    except Exception as e:
+        return pd.DataFrame(), 0
 
-COLOR_PALETTE = px.colors.qualitative.Pastel
-
-# ── 데이터 로딩 ──────────────────────────────────────────
-@st.cache_data
-def load_data():
-    df = pd.read_csv("sample_localpay_data.csv")
-    # 업종 컬럼에 섞인 지역명 등 오염값 제거
-    df = df[~df["industry"].isin(["광교1동", "회원정보미상"])]
-    for c in ["payment_amount", "transaction_count", "avg_ticket"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    return df
+@st.cache_data(ttl=3600)
+def fetch_store_by_sigungu(api_key: str, sigungu_cd: str, page_no: int = 1, num_rows: int = 1000):
+    """시군구 코드 기준 상가 조회"""
+    url = "https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInAdmi"
+    params = {
+        "serviceKey": api_key,
+        "pageNo": page_no,
+        "numOfRows": num_rows,
+        "divId": "sigunguCd",
+        "key": sigungu_cd,
+        "type": "json"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        data = resp.json()
+        body = data.get("body", {})
+        items = body.get("items", [])
+        total = body.get("totalCount", 0)
+        return pd.DataFrame(items) if items else pd.DataFrame(), total
+    except Exception as e:
+        return pd.DataFrame(), 0
 
 def format_won(value):
-    value = float(value)
-    if value >= 100_000_000:
-        return f"{value/100_000_000:.1f}억 원"
-    if value >= 10_000:
-        return f"{value/10_000:.0f}만 원"
-    return f"{value:,.0f}원"
+    v = float(value)
+    if v >= 100_000_000:
+        return f"{v/100_000_000:.1f}억"
+    if v >= 10_000:
+        return f"{v/10_000:.0f}만"
+    return f"{v:,.0f}"
 
-def check_columns(data):
-    return [c for c in REQUIRED_COLUMNS if c not in data.columns]
-
-# ── 창업 참고 점수 ────────────────────────────────────────
-def startup_score(data):
-    grouped = data.groupby("industry", as_index=False).agg(
-        결제금액=("payment_amount", "sum"),
-        결제건수=("transaction_count", "sum"),
-        평균객단가=("avg_ticket", "mean")
-    )
-    def norm(s):
-        if s.max() == s.min():
-            return pd.Series([0.5] * len(s), index=s.index)
-        return (s - s.min()) / (s.max() - s.min())
-    grouped["창업참고점수"] = (
-        norm(grouped["결제금액"]) * 0.5 +
-        norm(grouped["결제건수"]) * 0.3 +
-        norm(grouped["평균객단가"]) * 0.2
-    ) * 100
-    grouped["평균객단가"] = grouped["평균객단가"].round(0).astype(int)
-    grouped["결제금액표시"] = grouped["결제금액"].apply(format_won)
-    grouped["창업참고점수"] = grouped["창업참고점수"].round(1)
-    return grouped.sort_values("창업참고점수", ascending=False).reset_index(drop=True)
-
-# ── Claude API 리포트 ─────────────────────────────────────
-def generate_ai_report(summary: dict) -> str:
+# ── AI 분석 ─────────────────────────────────────────────
+def generate_ai_analysis(summary: dict) -> str:
     try:
         client = anthropic.Anthropic()
         prompt = f"""
-당신은 지역화폐 소비 데이터를 분석하는 전문 AI 애널리스트입니다.
-아래 데이터를 바탕으로 소상공인과 정책 담당자에게 유용한 분석 리포트를 한국어로 작성해주세요.
+당신은 소상공인 창업을 돕는 AI 상권분석 전문가입니다.
+아래 실제 공공데이터(소상공인시장진흥공단 상가정보)를 바탕으로 창업 희망자에게 유용한 분석을 해주세요.
 
-[분석 대상]
-- 지역: {summary['area']}
-- 분석 기간: {summary['months']}
-- 총 결제금액: {summary['total_payment']}
-- 총 거래건수: {summary['total_txn']}건
-- 평균 객단가: {summary['avg_ticket']}
+[분석 조건]
+- 지역: {summary['region']}
+- 관심 업종: {summary['industry']}
+- 전체 상가 수: {summary['total_stores']:,}개
+- 해당 업종 점포 수: {summary['target_stores']:,}개
+- 업종 집중도(해당업종/전체): {summary['concentration']:.1f}%
+- 상위 5개 행정동 밀집 현황: {summary['top_districts']}
+- 업종 다양성 지수 (동일 지역 내 업종 수): {summary['industry_diversity']}개 업종
 
-[업종별 결제금액 TOP 5]
-{summary['top_industries']}
+다음을 포함해 창업자 관점의 분석 리포트를 작성해주세요:
+1. **시장 현황 요약** — 이 지역 이 업종의 경쟁 강도는?
+2. **유망 입지 추천** — 어느 행정동이 창업에 유리한가? (과포화 vs 블루오션)
+3. **창업 리스크 요인** — 주의해야 할 점
+4. **AI 종합 의견** — 한 줄 결론
 
-[연령대별 결제금액]
-{summary['age_distribution']}
-
-[창업 참고 점수 TOP 3 업종]
-{summary['top_startup']}
-
-다음 항목을 포함해 리포트를 작성해주세요:
-1. **핵심 인사이트** (이 지역의 소비 특징을 2~3문장으로 요약)
-2. **주목할 업종** (왜 이 업종이 강세인지 해석)
-3. **소상공인 창업 제언** (데이터 기반으로 실질적인 조언)
-4. **정책 제언** (지역화폐 효율화를 위한 제안)
-5. **주의사항** (데이터 한계 및 유의점)
-
-리포트는 친근하면서도 전문적인 톤으로, 마크다운 형식으로 작성해주세요.
+친근하고 실용적인 톤으로, 마크다운 형식으로 작성해주세요.
 """
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -135,340 +148,302 @@ def generate_ai_report(summary: dict) -> str:
         )
         return message.content[0].text
     except anthropic.AuthenticationError:
-        return "⚠️ API 키 오류: 사이드바에서 Anthropic API 키를 입력해주세요."
+        return "⚠️ API 키를 확인해주세요. 사이드바에서 Anthropic API 키를 입력하세요."
     except Exception as e:
-        return f"⚠️ AI 리포트 생성 중 오류가 발생했습니다: {str(e)}"
+        return f"⚠️ AI 분석 생성 오류: {str(e)}"
 
 # ════════════════════════════════════════════════════════
 # 메인 UI
 # ════════════════════════════════════════════════════════
 
-st.title("💳 LocalPay AI Analyst")
-st.subheader("수원시 지역화폐 공공데이터 기반 소상공인 상권분석 플랫폼")
+st.markdown("""
+<div class="main-header">
+    <h1 style="margin:0; font-size:1.8rem;">🏪 AI 창업 상권분석 플랫폼</h1>
+    <p style="margin:6px 0 0 0; opacity:0.9;">소상공인진흥공단 실데이터 기반 · AI 입지 분석 · 업종별 경쟁 현황</p>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<span class="data-badge">📊 소상공인시장진흥공단 상가정보 API</span>
+<span class="data-badge">🏛️ 공공데이터포털 data.go.kr</span>
+<span class="data-badge">🤖 Claude AI 분석</span>
+""", unsafe_allow_html=True)
 
 # ── 사이드바 ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ 설정")
+    st.header("⚙️ API 설정")
 
-    api_key = st.text_input(
-        "Anthropic API 키 (AI 리포트용)",
+    pub_api_key = st.text_input(
+        "공공데이터포털 API 키",
         type="password",
-        placeholder="sk-ant-...",
-        help="AI 리포트 탭에서 Claude가 자동 분석을 생성합니다. 없으면 기본 리포트가 표시됩니다."
+        placeholder="공공데이터포털 발급 키 입력",
+        help="data.go.kr 회원가입 후 '소상공인시장진흥공단_상가(상권)정보' 활용신청"
     )
-    if api_key:
-        import os
-        os.environ["ANTHROPIC_API_KEY"] = api_key
 
-    st.divider()
-    st.header("📂 데이터")
-    uploaded = st.file_uploader("CSV 파일 업로드 (선택)", type=["csv"])
-    st.caption("업로드하지 않으면 기본 데이터(2025년 11월 수원시)를 사용합니다.")
+    anthropic_key = st.text_input(
+        "Anthropic API 키 (AI 분석용)",
+        type="password",
+        placeholder="sk-ant-..."
+    )
+    if anthropic_key:
+        os.environ["ANTHROPIC_API_KEY"] = anthropic_key
 
     st.divider()
     st.header("🔍 분석 조건")
 
-df = pd.read_csv(uploaded) if uploaded else load_data()
+    sido = st.selectbox("시/도 선택", list(SIDO_CODES.keys()), index=0)
+    industry_name = st.selectbox("관심 업종", list(INDUSTRY_MAP.keys()), index=0)
+    top_n = st.slider("행정동 TOP N 표시", 5, 20, 10)
 
-missing = check_columns(df)
-if missing:
-    st.error(f"CSV 컬럼 오류 — 다음 컬럼이 없습니다: {', '.join(missing)}")
-    st.stop()
-
-for c in ["payment_amount", "transaction_count", "avg_ticket"]:
-    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-with st.sidebar:
-    regions = ["전체"] + sorted(df["region"].astype(str).unique().tolist())
-    region = st.selectbox("시/군/구", regions, index=1 if len(regions) > 1 else 0)
-
-    filtered = df.copy()
-    if region != "전체":
-        filtered = filtered[filtered["region"].astype(str) == region]
-
-    districts = ["전체"] + sorted(filtered["district"].astype(str).unique().tolist())
-    district = st.selectbox("읍/면/동", districts)
-    if district != "전체":
-        filtered = filtered[filtered["district"].astype(str) == district]
-
-    months = sorted(filtered["month"].astype(str).unique().tolist())
-    selected_months = st.multiselect("분석 월", months, default=months)
-    if selected_months:
-        filtered = filtered[filtered["month"].astype(str).isin(selected_months)]
+    analyze_btn = st.button("🚀 상권 분석 시작", type="primary", use_container_width=True)
 
     st.divider()
-    st.caption("📊 데이터: 공공데이터포털 경기도 수원시 지역화폐 결제정보 (2025.11)")
-    st.caption(f"🏪 수원시 가맹점 수: {SUWON_MERCHANT_TOTAL:,}개")
+    st.caption("📌 API 키 발급 방법")
+    st.caption("1. data.go.kr 회원가입")
+    st.caption("2. '소상공인 상가정보' 검색")
+    st.caption("3. 활용신청 → 인증키 발급")
+    st.caption("(개발계정 약 1시간 후 사용 가능)")
 
-if filtered.empty:
-    st.warning("선택 조건에 해당하는 데이터가 없습니다.")
-    st.stop()
+# ── 메인 콘텐츠 ──────────────────────────────────────────
+if not analyze_btn:
+    # 랜딩 화면
+    st.markdown("### 📖 이 플랫폼은 무엇인가요?")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("**📍 지역 × 업종 분석**\n\n관심 지역의 특정 업종 점포 수, 밀집 행정동, 경쟁 강도를 한눈에 파악합니다.")
+    with col2:
+        st.success("**📊 실데이터 기반**\n\n소상공인시장진흥공단이 국세청·카드사 데이터로 구축한 전국 상가정보를 실시간 호출합니다.")
+    with col3:
+        st.warning("**🤖 AI 창업 제언**\n\nClaude AI가 데이터를 해석해 블루오션 입지, 리스크 요인, 창업 적합도를 제안합니다.")
 
-# ── KPI 카드 ──────────────────────────────────────────────
-total_payment = filtered["payment_amount"].sum()
-total_txn = filtered["transaction_count"].sum()
-avg_ticket = total_payment / max(total_txn, 1)
-industry_count = filtered["industry"].nunique()
+    st.markdown("---")
+    st.markdown("### 🗂️ 활용 데이터 출처")
+    st.markdown("""
+| 데이터 | 제공기관 | 내용 | 링크 |
+|--------|---------|------|------|
+| 상가(상권)정보 API | 소상공인시장진흥공단 | 전국 상가업소 업종·위치·상호 | [data.go.kr](https://www.data.go.kr/data/15012005/openapi.do) |
+| 전국지역화폐가맹점 | 행정안전부 | 지역화폐 가맹점 현황 | [data.go.kr](https://www.data.go.kr/data/15100062/standard.do) |
+| 온누리상품권 가맹점 | 소상공인시장진흥공단 | 온누리 가맹점 전국 현황 | [data.go.kr](https://www.data.go.kr/data/3060079/fileData.do) |
+""")
+    st.info("👈 사이드바에서 API 키와 분석 조건을 입력하고 **상권 분석 시작** 버튼을 눌러주세요.")
 
-area_label = region if district == "전체" else f"{region} {district}"
-
-st.info(f"📍 분석 지역: **{area_label}** | 기간: **{', '.join(selected_months) if selected_months else '전체'}**")
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("💰 총 결제금액", format_won(total_payment))
-col2.metric("🧾 총 거래건수", f"{total_txn:,.0f}건")
-col3.metric("🛒 평균 객단가", format_won(avg_ticket))
-col4.metric("🏪 분석 업종 수", f"{industry_count}개")
-
-st.divider()
-
-# ── 탭 ───────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📍 지역 분석", "🏪 업종 분석", "👥 연령·성별 분석", "🤖 AI 리포트"])
-
-# ── 탭1: 지역 분석 ───────────────────────────────────────
-with tab1:
-    st.markdown("### 읍·면·동별 결제금액")
-    district_pay = (
-        filtered.groupby("district")["payment_amount"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-    district_pay.columns = ["읍면동", "결제금액"]
-    district_pay["결제금액표시"] = district_pay["결제금액"].apply(format_won)
-
-    fig = px.bar(
-        district_pay, x="읍면동", y="결제금액",
-        text="결제금액표시",
-        color="결제금액",
-        color_continuous_scale="Blues",
-        title=f"{area_label} 읍·면·동별 결제금액"
-    )
-    fig.update_traces(textposition="outside")
-    fig.update_layout(
-        xaxis_tickangle=-35,
-        coloraxis_showscale=False,
-        height=420,
-        plot_bgcolor="white"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("📋 상세 데이터 보기"):
-        st.dataframe(district_pay[["읍면동", "결제금액표시"]].rename(columns={"결제금액표시": "결제금액"}), use_container_width=True)
-
-# ── 탭2: 업종 분석 ───────────────────────────────────────
-with tab2:
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.markdown("### 업종별 결제금액 TOP 15")
-        industry_pay = (
-            filtered.groupby("industry")["payment_amount"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(15)
-            .reset_index()
-        )
-        industry_pay.columns = ["업종", "결제금액"]
-        industry_pay["표시"] = industry_pay["결제금액"].apply(format_won)
-
-        fig2 = px.bar(
-            industry_pay, x="결제금액", y="업종",
-            orientation="h", text="표시",
-            color="결제금액",
-            color_continuous_scale="Teal",
-            title="업종별 결제금액"
-        )
-        fig2.update_traces(textposition="outside")
-        fig2.update_layout(
-            yaxis=dict(autorange="reversed"),
-            coloraxis_showscale=False,
-            height=460,
-            plot_bgcolor="white"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-    with col_b:
-        st.markdown("### 업종별 결제 비중")
-        top10 = (
-            filtered.groupby("industry")["payment_amount"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(10)
-            .reset_index()
-        )
-        top10.columns = ["업종", "결제금액"]
-        fig3 = px.pie(
-            top10, names="업종", values="결제금액",
-            color_discrete_sequence=COLOR_PALETTE,
-            title="상위 10개 업종 비중"
-        )
-        fig3.update_traces(textposition="inside", textinfo="percent+label")
-        fig3.update_layout(height=460, showlegend=False)
-        st.plotly_chart(fig3, use_container_width=True)
-
-    st.markdown("### 🏆 창업 참고 점수")
-    st.caption("결제금액(50%) + 거래건수(30%) + 평균객단가(20%) 기반 1차 참고 지표입니다.")
-    score_df = startup_score(filtered)
-
-    fig4 = px.bar(
-        score_df.head(15), x="창업참고점수", y="industry",
-        orientation="h",
-        text="창업참고점수",
-        color="창업참고점수",
-        color_continuous_scale="Oranges",
-        title="업종별 창업 참고 점수 TOP 15"
-    )
-    fig4.update_traces(texttemplate="%{text:.1f}점", textposition="outside")
-    fig4.update_layout(
-        yaxis=dict(autorange="reversed", title="업종"),
-        coloraxis_showscale=False,
-        height=460,
-        plot_bgcolor="white"
-    )
-    st.plotly_chart(fig4, use_container_width=True)
-
-    with st.expander("📋 전체 업종 점수 테이블"):
-        display_score = score_df[["industry", "결제금액표시", "결제건수", "평균객단가", "창업참고점수"]].copy()
-        display_score.columns = ["업종", "결제금액", "거래건수", "평균객단가(원)", "창업참고점수"]
-        st.dataframe(display_score, use_container_width=True)
-
-# ── 탭3: 연령·성별 분석 ──────────────────────────────────
-with tab3:
-    col_c, col_d = st.columns(2)
-
-    with col_c:
-        st.markdown("### 연령대별 결제금액")
-        age_order = ["10대", "20대", "30대", "40대", "50대", "60대 이상"]
-        age_pay = (
-            filtered.groupby("age_group")["payment_amount"]
-            .sum()
-            .reindex([a for a in age_order if a in filtered["age_group"].unique()])
-            .reset_index()
-        )
-        age_pay.columns = ["연령대", "결제금액"]
-        age_pay["표시"] = age_pay["결제금액"].apply(format_won)
-
-        fig5 = px.bar(
-            age_pay, x="연령대", y="결제금액",
-            text="표시",
-            color="연령대",
-            color_discrete_sequence=COLOR_PALETTE,
-            title="연령대별 결제금액"
-        )
-        fig5.update_traces(textposition="outside")
-        fig5.update_layout(
-            showlegend=False,
-            height=380,
-            plot_bgcolor="white"
-        )
-        st.plotly_chart(fig5, use_container_width=True)
-
-    with col_d:
-        if "gender" in filtered.columns:
-            st.markdown("### 성별 결제금액")
-            gender_pay = (
-                filtered.groupby("gender")["payment_amount"]
-                .sum()
-                .reset_index()
-            )
-            gender_pay.columns = ["성별", "결제금액"]
-            gender_pay["표시"] = gender_pay["결제금액"].apply(format_won)
-
-            fig6 = px.pie(
-                gender_pay, names="성별", values="결제금액",
-                color_discrete_sequence=["#74b9ff", "#fd79a8"],
-                title="성별 결제 비중"
-            )
-            fig6.update_traces(textinfo="percent+label", textposition="inside")
-            fig6.update_layout(height=380)
-            st.plotly_chart(fig6, use_container_width=True)
-
-    # 연령대 × 업종 히트맵
-    st.markdown("### 연령대 × 업종 결제금액 히트맵")
-    top_industries = (
-        filtered.groupby("industry")["payment_amount"]
-        .sum()
-        .sort_values(ascending=False)
-        .head(12)
-        .index.tolist()
-    )
-    heat_data = (
-        filtered[filtered["industry"].isin(top_industries)]
-        .groupby(["age_group", "industry"])["payment_amount"]
-        .sum()
-        .unstack(fill_value=0)
-    )
-    heat_data = heat_data.reindex([a for a in age_order if a in heat_data.index])
-
-    fig7 = px.imshow(
-        heat_data,
-        color_continuous_scale="YlOrRd",
-        aspect="auto",
-        title="연령대 × 업종 결제금액 히트맵",
-        labels={"color": "결제금액(원)"}
-    )
-    fig7.update_layout(height=350)
-    st.plotly_chart(fig7, use_container_width=True)
-
-# ── 탭4: AI 리포트 ───────────────────────────────────────
-with tab4:
-    st.markdown("### 🤖 AI Analyst 리포트")
-    st.caption("Claude AI가 데이터를 분석하여 인사이트와 제언을 생성합니다.")
-
-    # 리포트용 요약 데이터 준비
-    industry_top5 = (
-        filtered.groupby("industry")["payment_amount"]
-        .sum()
-        .sort_values(ascending=False)
-        .head(5)
-    )
-    industry_str = "\n".join(
-        [f"  {i+1}. {row[0]}: {format_won(row[1])}" for i, row in enumerate(industry_top5.items())]
-    )
-
-    age_dist = filtered.groupby("age_group")["payment_amount"].sum().sort_values(ascending=False)
-    age_str = "\n".join(
-        [f"  - {row[0]}: {format_won(row[1])}" for row in age_dist.items()]
-    )
-
-    score_top3 = startup_score(filtered).head(3)["industry"].tolist()
-
-    summary = {
-        "area": area_label,
-        "months": ", ".join(selected_months) if selected_months else "전체",
-        "total_payment": format_won(total_payment),
-        "total_txn": f"{total_txn:,.0f}",
-        "avg_ticket": format_won(avg_ticket),
-        "top_industries": industry_str,
-        "age_distribution": age_str,
-        "top_startup": ", ".join(score_top3)
-    }
-
-    if st.button("🚀 AI 리포트 생성", type="primary"):
-        with st.spinner("Claude AI가 데이터를 분석 중입니다..."):
-            report = generate_ai_report(summary)
-        st.markdown(f'<div class="report-box">{report}</div>', unsafe_allow_html=True)
-    else:
-        # 기본 템플릿 리포트
-        st.markdown(f"""
-**📊 기본 요약 리포트 | {area_label}**
-
-- 분석 기간: {', '.join(selected_months) if selected_months else '전체'}
-- 총 결제금액: **{format_won(total_payment)}**, 거래건수: **{total_txn:,.0f}건**, 평균 객단가: **{format_won(avg_ticket)}**
-- 결제금액 1위 업종: **{industry_top5.index[0]}** ({format_won(industry_top5.iloc[0])})
-- 주요 소비 연령대: **{age_dist.index[0]}**
-- 창업 참고 TOP 3 업종: **{', '.join(score_top3)}**
-
-> 💡 **AI 리포트 생성** 버튼을 누르면 Claude AI가 더 깊은 인사이트와 제언을 작성해드립니다.  
-> (사이드바에서 Anthropic API 키 입력 필요)
+elif not pub_api_key:
+    st.error("공공데이터포털 API 키를 사이드바에 입력해주세요.")
+    st.markdown("""
+**API 키 발급 방법:**
+1. [data.go.kr](https://www.data.go.kr) 접속 → 회원가입
+2. 검색창에 **'소상공인시장진흥공단 상가정보'** 검색
+3. 오픈API → 활용신청
+4. 개발계정 자동승인 (약 1시간 후 사용 가능)
 """)
 
+else:
+    sido_cd = SIDO_CODES[sido]
+    inds_cd = INDUSTRY_MAP[industry_name]
+
+    with st.spinner(f"🔄 {sido} 상가 데이터를 불러오는 중..."):
+        df_all, total_all = fetch_store_data(pub_api_key, sido_cd, num_rows=1000)
+        df_target, total_target = fetch_store_data(pub_api_key, sido_cd, inds_lrg_cd=inds_cd, num_rows=1000)
+
+    if df_all.empty:
+        st.error("데이터를 불러오지 못했습니다. API 키와 네트워크 상태를 확인해주세요.")
+        st.stop()
+
+    # ── KPI ────────────────────────────────────────────
+    concentration = (len(df_target) / max(len(df_all), 1)) * 100
+
+    st.info(f"📍 **{sido}** | 업종: **{industry_name}** | 조회 기준: 소상공인시장진흥공단 상가정보 (실데이터)")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("전체 조회 상가 수", f"{len(df_all):,}개")
+    c2.metric(f"{industry_name} 점포 수", f"{len(df_target):,}개")
+    c3.metric("업종 집중도", f"{concentration:.1f}%")
+    c4.metric("API 총 레코드", f"{total_all:,}개")
+
     st.divider()
-    st.markdown("#### 📌 데이터 한계 및 유의사항")
-    st.info("""
-- 본 데이터는 **2025년 11월 수원시 지역화폐 결제정보** 공공데이터 기반입니다.
-- 임대료, 유동인구, 재방문율, 이벤트 효과 등의 변수는 포함되어 있지 않습니다.
-- 창업 참고 점수는 결제금액·건수·객단가 기반의 1차 지표로, 실제 창업 결정에는 현장 조사가 병행되어야 합니다.
-- 수원시 전체 지역화폐 가맹점 수는 **{:,}개** (경기도 지역화폐 가맹점 현황 OpenAPI 기준)입니다.
-""".format(SUWON_MERCHANT_TOTAL))
+
+    tab1, tab2, tab3 = st.tabs(["📍 지역별 분포", "🏪 업종 현황", "🤖 AI 창업 분석"])
+
+    # ── 탭1: 지역별 분포 ──────────────────────────────
+    with tab1:
+        if not df_all.empty and "adongNm" in df_all.columns:
+            st.markdown(f"### {sido} 행정동별 전체 상가 분포")
+
+            dong_count = (
+                df_all.groupby("adongNm")
+                .size()
+                .reset_index(name="점포수")
+                .sort_values("점포수", ascending=False)
+                .head(top_n)
+            )
+
+            fig1 = px.bar(
+                dong_count, x="adongNm", y="점포수",
+                text="점포수",
+                color="점포수",
+                color_continuous_scale="Blues",
+                title=f"{sido} 행정동별 상가 점포 수 TOP {top_n}"
+            )
+            fig1.update_traces(textposition="outside")
+            fig1.update_layout(
+                xaxis_tickangle=-35,
+                coloraxis_showscale=False,
+                height=420,
+                plot_bgcolor="white"
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+
+            if not df_target.empty and "adongNm" in df_target.columns:
+                st.markdown(f"### {industry_name} 업종 행정동별 분포")
+                target_dong = (
+                    df_target.groupby("adongNm")
+                    .size()
+                    .reset_index(name="점포수")
+                    .sort_values("점포수", ascending=False)
+                    .head(top_n)
+                )
+                fig2 = px.bar(
+                    target_dong, x="adongNm", y="점포수",
+                    text="점포수",
+                    color="점포수",
+                    color_continuous_scale="Oranges",
+                    title=f"{sido} {industry_name} 행정동별 집중도 TOP {top_n}"
+                )
+                fig2.update_traces(textposition="outside")
+                fig2.update_layout(
+                    xaxis_tickangle=-35,
+                    coloraxis_showscale=False,
+                    height=420,
+                    plot_bgcolor="white"
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.warning("행정동 데이터가 없습니다. API 응답을 확인해주세요.")
+            if not df_all.empty:
+                st.write("API 응답 컬럼:", df_all.columns.tolist())
+
+    # ── 탭2: 업종 현황 ────────────────────────────────
+    with tab2:
+        if not df_all.empty and "indsMclsNm" in df_all.columns:
+            col_a, col_b = st.columns(2)
+
+            with col_a:
+                st.markdown("### 업종 중분류별 점포 수")
+                inds_count = (
+                    df_all.groupby("indsMclsNm")
+                    .size()
+                    .reset_index(name="점포수")
+                    .sort_values("점포수", ascending=False)
+                    .head(15)
+                )
+                fig3 = px.bar(
+                    inds_count, x="점포수", y="indsMclsNm",
+                    orientation="h",
+                    text="점포수",
+                    color="점포수",
+                    color_continuous_scale="Teal",
+                    title="업종 중분류별 점포 수 TOP 15"
+                )
+                fig3.update_traces(textposition="outside")
+                fig3.update_layout(
+                    yaxis=dict(autorange="reversed"),
+                    coloraxis_showscale=False,
+                    height=480,
+                    plot_bgcolor="white"
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+
+            with col_b:
+                st.markdown("### 업종 대분류 비중")
+                if "indsLclsNm" in df_all.columns:
+                    lrg_count = (
+                        df_all.groupby("indsLclsNm")
+                        .size()
+                        .reset_index(name="점포수")
+                        .sort_values("점포수", ascending=False)
+                    )
+                    fig4 = px.pie(
+                        lrg_count, names="indsLclsNm", values="점포수",
+                        color_discrete_sequence=px.colors.qualitative.Pastel,
+                        title="업종 대분류 비중"
+                    )
+                    fig4.update_traces(textposition="inside", textinfo="percent+label")
+                    fig4.update_layout(height=480, showlegend=False)
+                    st.plotly_chart(fig4, use_container_width=True)
+
+            with st.expander("📋 전체 상가 데이터 보기 (상위 200개)"):
+                cols_to_show = [c for c in ["bizesNm", "indsLclsNm", "indsMclsNm", "indsScnm", "lnAdr", "rdnAdr"] if c in df_all.columns]
+                rename_map = {
+                    "bizesNm": "상호명", "indsLclsNm": "대분류",
+                    "indsMclsNm": "중분류", "indsScnm": "소분류",
+                    "lnAdr": "지번주소", "rdnAdr": "도로명주소"
+                }
+                st.dataframe(
+                    df_all[cols_to_show].head(200).rename(columns=rename_map),
+                    use_container_width=True
+                )
+        else:
+            st.warning("업종 분류 데이터가 없습니다.")
+            if not df_all.empty:
+                st.write("API 응답 샘플:", df_all.head(3))
+
+    # ── 탭3: AI 창업 분석 ────────────────────────────
+    with tab3:
+        st.markdown("### 🤖 AI 창업 상권 분석 리포트")
+        st.caption("Claude AI가 실데이터를 해석해 창업 입지와 리스크를 분석합니다.")
+
+        # 요약 데이터 준비
+        top_districts_str = "데이터 없음"
+        industry_diversity = 0
+
+        if not df_target.empty and "adongNm" in df_target.columns:
+            top5 = (
+                df_target.groupby("adongNm")
+                .size()
+                .sort_values(ascending=False)
+                .head(5)
+            )
+            top_districts_str = ", ".join([f"{k}({v}개)" for k, v in top5.items()])
+
+        if not df_all.empty and "indsMclsNm" in df_all.columns:
+            industry_diversity = df_all["indsMclsNm"].nunique()
+
+        summary = {
+            "region": sido,
+            "industry": industry_name,
+            "total_stores": len(df_all),
+            "target_stores": len(df_target),
+            "concentration": concentration,
+            "top_districts": top_districts_str,
+            "industry_diversity": industry_diversity
+        }
+
+        if st.button("🚀 AI 분석 리포트 생성", type="primary"):
+            if not anthropic_key:
+                st.warning("AI 분석을 위해 사이드바에서 Anthropic API 키를 입력해주세요.")
+            else:
+                with st.spinner("Claude AI가 상권 데이터를 분석 중입니다..."):
+                    report = generate_ai_analysis(summary)
+                st.markdown(f'<div class="insight-box">{report}</div>', unsafe_allow_html=True)
+        else:
+            # 기본 요약
+            st.markdown(f"""
+**📊 기본 분석 요약**
+
+- **분석 지역**: {sido}
+- **관심 업종**: {industry_name}
+- **전체 상가 중 {industry_name} 비중**: {concentration:.1f}% ({len(df_target):,}개 / {len(df_all):,}개)
+- **밀집 행정동 TOP 5**: {top_districts_str}
+- **지역 내 업종 다양성**: {industry_diversity}개 중분류
+
+> 💡 **AI 분석 리포트 생성** 버튼을 누르면 Claude AI가 블루오션 입지, 경쟁강도, 창업 리스크를 상세히 분석해드립니다.
+""")
+
+        st.divider()
+        st.markdown("#### 📌 데이터 및 분석 한계")
+        st.info("""
+- 본 분석은 **소상공인시장진흥공단 상가(상권)정보 API** 실데이터 기반입니다.
+- 매출액, 임대료, 유동인구는 포함되지 않으며, 점포 수 기반의 경쟁 밀도 분석입니다.
+- API 1회 호출 기준 최대 1,000건 조회 (전체 데이터는 페이징 처리 필요)
+- 창업 결정 시 반드시 현장 조사와 전문가 상담을 병행하시기 바랍니다.
+""")
