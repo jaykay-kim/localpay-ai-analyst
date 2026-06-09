@@ -24,34 +24,29 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── 상수 ──────────────────────────────────────────────
 SIDO_LIST = [
     "서울특별시", "광주광역시", "부산광역시", "대구광역시", "대전광역시",
     "인천광역시", "울산광역시", "세종특별자치시", "경기도", "강원특별자치도",
     "충청북도", "충청남도", "전북특별자치도", "경상남도"
 ]
-
 SIDO_API_CODES = {
     "서울특별시":"11","부산광역시":"26","대구광역시":"27","인천광역시":"28",
     "광주광역시":"29","대전광역시":"30","울산광역시":"31","세종특별자치시":"36",
     "경기도":"41","강원특별자치도":"51","충청북도":"43","충청남도":"44",
     "전북특별자치도":"52","경상남도":"48"
 }
-
-INDUSTRY_LIST = [
+INDUSTRY_LIST = sorted(list(set([
     "한식", "중식", "일식", "서양식", "기타 간이", "기타 외국",
     "구내식당·뷔페", "주점", "비알코올 ",
     "이용·미용", "욕탕·신체관리", "세탁",
     "의원", "병원", "의약·화장품 소매", "수의",
     "일반 교육", "기타 교육", "스포츠 서비스",
-    "한식", "식료품 소매", "종합 소매", "음료 소매",
+    "식료품 소매", "종합 소매", "음료 소매",
     "섬유·의복·신발 소매", "가구 소매", "가전·통신 소매",
     "부동산 서비스", "여행사·보조", "사진 촬영",
     "자동차 수리·세차", "컴퓨터 수리"
-]
-INDUSTRY_LIST = sorted(list(set(INDUSTRY_LIST)))
+])))
 
-# ── 데이터 ────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def try_api(api_key, sido_cd):
     try:
@@ -69,22 +64,14 @@ def try_api(api_key, sido_cd):
 
 @st.cache_data
 def load_sample():
-    df = pd.read_csv("sample_store_data.csv")
-    return df
+    return pd.read_csv("sample_store_data.csv")
 
 def get_data(api_key, sido):
     sido_cd = SIDO_API_CODES.get(sido, "11")
     if api_key:
         df, total = try_api(api_key, sido_cd)
         if df is not None and not df.empty:
-            # API 컬럼명 → 통일
-            df = df.rename(columns={
-                "bizesNm":"bizesNm","indsLclsNm":"indsLclsNm",
-                "indsMclsNm":"indsMclsNm","adongNm":"adongNm",
-                "lnAdr":"lnAdr","rdnAdr":"rdnAdr"
-            })
             return df, total, "✅ 실데이터 (소상공인시장진흥공단 API 실시간 호출)"
-    # fallback: 샘플
     df_all = load_sample()
     df = df_all[df_all["sigunguNm"] == sido].copy()
     if df.empty:
@@ -122,9 +109,25 @@ def generate_ai_analysis(summary):
     except Exception as e:
         return f"⚠️ AI 분석 오류: {str(e)}"
 
-# ══════════════════════════════════════════════════════
-# UI
-# ══════════════════════════════════════════════════════
+# ── session_state 초기화 ──────────────────────────────
+if "analyzed" not in st.session_state:
+    st.session_state.analyzed = False
+if "ai_report" not in st.session_state:
+    st.session_state.ai_report = ""
+if "df_all" not in st.session_state:
+    st.session_state.df_all = None
+if "df_target" not in st.session_state:
+    st.session_state.df_target = None
+if "summary" not in st.session_state:
+    st.session_state.summary = {}
+if "data_source" not in st.session_state:
+    st.session_state.data_source = ""
+if "sido_saved" not in st.session_state:
+    st.session_state.sido_saved = ""
+if "industry_saved" not in st.session_state:
+    st.session_state.industry_saved = ""
+
+# ── UI ───────────────────────────────────────────────
 st.markdown("""
 <div class="main-header">
   <h1 style="margin:0;font-size:1.8rem;">🏪 AI 창업 상권분석 플랫폼</h1>
@@ -138,17 +141,10 @@ st.markdown("""
 <span class="data-badge">📅 2026년 3월 기준</span>
 """, unsafe_allow_html=True)
 
-# ── 사이드바 ─────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 설정")
-    pub_api_key = st.text_input(
-        "공공데이터포털 API 키 (선택)",
-        type="password", placeholder="없으면 실데이터 샘플로 동작"
-    )
-    anthropic_key = st.text_input(
-        "Anthropic API 키 (AI 분석용)",
-        type="password", placeholder="sk-ant-..."
-    )
+    pub_api_key = st.text_input("공공데이터포털 API 키 (선택)", type="password", placeholder="없으면 실데이터 샘플로 동작")
+    anthropic_key = st.text_input("Anthropic API 키 (AI 분석용)", type="password", placeholder="sk-ant-...")
     if anthropic_key:
         os.environ["ANTHROPIC_API_KEY"] = anthropic_key
 
@@ -163,8 +159,38 @@ with st.sidebar:
     st.caption("💡 API 키 없이도 실데이터 샘플로 시연 가능")
     st.caption("출처: 소상공인시장진흥공단 상가(상권)정보 2026.03")
 
-# ── 메인 ────────────────────────────────────────────
-if not analyze_btn:
+# ── 분석 실행 ─────────────────────────────────────────
+if analyze_btn:
+    with st.spinner(f"🔄 {sido} 데이터 로딩 중..."):
+        df_all, total_all, data_source = get_data(pub_api_key, sido)
+    df_target = df_all[df_all["indsMclsNm"] == industry_name].copy() if "indsMclsNm" in df_all.columns else pd.DataFrame()
+    concentration = (len(df_target) / max(len(df_all), 1)) * 100
+    dong_col = "adongNm" if "adongNm" in df_all.columns else None
+    top_districts_str = "데이터 없음"
+    if not df_target.empty and dong_col:
+        top5 = df_target.groupby(dong_col).size().sort_values(ascending=False).head(5)
+        top_districts_str = ", ".join([f"{k}({v}개)" for k, v in top5.items()])
+    industry_diversity = df_all["indsMclsNm"].nunique() if "indsMclsNm" in df_all.columns else 0
+
+    # session_state에 저장
+    st.session_state.analyzed = True
+    st.session_state.ai_report = ""
+    st.session_state.df_all = df_all
+    st.session_state.df_target = df_target
+    st.session_state.data_source = data_source
+    st.session_state.sido_saved = sido
+    st.session_state.industry_saved = industry_name
+    st.session_state.summary = {
+        "region": sido, "industry": industry_name,
+        "total_stores": len(df_all), "target_stores": len(df_target),
+        "concentration": concentration,
+        "top_districts": top_districts_str,
+        "industry_diversity": industry_diversity,
+        "total_all": total_all
+    }
+
+# ── 결과 표시 ─────────────────────────────────────────
+if not st.session_state.analyzed:
     c1, c2, c3 = st.columns(3)
     with c1:
         st.info("**📍 지역 × 업종 분석**\n\n전국 상가 실데이터 기반으로 행정동별 점포 수와 경쟁 밀도를 분석합니다.")
@@ -172,7 +198,6 @@ if not analyze_btn:
         st.success("**📊 실데이터 기반**\n\n소상공인시장진흥공단 2026년 3월 전국 상가정보 (국세청·카드사 기반)를 활용합니다.")
     with c3:
         st.warning("**🤖 AI 창업 제언**\n\nClaude AI가 블루오션 입지, 경쟁 리스크, 창업 적합도를 분석합니다.")
-
     st.divider()
     st.markdown("### 🗂️ 활용 데이터 출처")
     st.markdown("""
@@ -185,77 +210,70 @@ if not analyze_btn:
     st.info("👈 사이드바에서 분석 조건을 설정하고 **상권 분석 시작**을 눌러주세요.")
 
 else:
-    with st.spinner(f"🔄 {sido} 데이터 로딩 중..."):
-        df_all, total_all, data_source = get_data(pub_api_key, sido)
+    df_all = st.session_state.df_all
+    df_target = st.session_state.df_target
+    summary = st.session_state.summary
+    sido_saved = st.session_state.sido_saved
+    industry_saved = st.session_state.industry_saved
+    concentration = summary["concentration"]
+    dong_col = "adongNm" if "adongNm" in df_all.columns else None
 
-    if "✅" in data_source:
-        st.success(data_source)
+    if "✅" in st.session_state.data_source:
+        st.success(st.session_state.data_source)
     else:
-        st.info(data_source)
+        st.info(st.session_state.data_source)
 
-    # 업종 필터
-    df_target = df_all[df_all["indsMclsNm"] == industry_name].copy() if "indsMclsNm" in df_all.columns else pd.DataFrame()
-    concentration = (len(df_target) / max(len(df_all), 1)) * 100
-
-    st.info(f"📍 **{sido}** | 관심 업종: **{industry_name}**")
+    st.info(f"📍 **{sido_saved}** | 관심 업종: **{industry_saved}**")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("전체 조회 상가", f"{len(df_all):,}개")
-    c2.metric(f"{industry_name} 점포", f"{len(df_target):,}개")
+    c2.metric(f"{industry_saved} 점포", f"{len(df_target):,}개")
     c3.metric("업종 집중도", f"{concentration:.1f}%")
-    c4.metric("전체 레코드 수", f"{total_all:,}개")
+    c4.metric("전체 레코드 수", f"{summary['total_all']:,}개")
 
     st.divider()
     tab1, tab2, tab3 = st.tabs(["📍 지역별 분포", "🏪 업종 현황", "🤖 AI 창업 분석"])
 
     with tab1:
-        dong_col = "adongNm" if "adongNm" in df_all.columns else None
         if dong_col:
-            c_a, c_b = st.columns(2)
-            with c_a:
+            ca, cb = st.columns(2)
+            with ca:
                 st.markdown(f"#### 행정동별 전체 상가 TOP {top_n}")
                 d = df_all.groupby(dong_col).size().reset_index(name="점포수").sort_values("점포수", ascending=False).head(top_n)
-                fig = px.bar(d, x=dong_col, y="점포수", text="점포수", color="점포수",
-                             color_continuous_scale="Blues")
+                fig = px.bar(d, x=dong_col, y="점포수", text="점포수", color="점포수", color_continuous_scale="Blues")
                 fig.update_traces(textposition="outside")
-                fig.update_layout(xaxis_tickangle=-35, coloraxis_showscale=False,
-                                  height=400, plot_bgcolor="white")
+                fig.update_layout(xaxis_tickangle=-35, coloraxis_showscale=False, height=400, plot_bgcolor="white")
                 st.plotly_chart(fig, use_container_width=True)
-            with c_b:
+            with cb:
                 if not df_target.empty:
-                    st.markdown(f"#### {industry_name} 행정동별 분포 TOP {top_n}")
+                    st.markdown(f"#### {industry_saved} 행정동별 분포 TOP {top_n}")
                     d2 = df_target.groupby(dong_col).size().reset_index(name="점포수").sort_values("점포수", ascending=False).head(top_n)
-                    fig2 = px.bar(d2, x=dong_col, y="점포수", text="점포수", color="점포수",
-                                  color_continuous_scale="Oranges")
+                    fig2 = px.bar(d2, x=dong_col, y="점포수", text="점포수", color="점포수", color_continuous_scale="Oranges")
                     fig2.update_traces(textposition="outside")
-                    fig2.update_layout(xaxis_tickangle=-35, coloraxis_showscale=False,
-                                       height=400, plot_bgcolor="white")
+                    fig2.update_layout(xaxis_tickangle=-35, coloraxis_showscale=False, height=400, plot_bgcolor="white")
                     st.plotly_chart(fig2, use_container_width=True)
                 else:
-                    st.warning(f"'{industry_name}' 업종 데이터가 없습니다.")
+                    st.warning(f"'{industry_saved}' 업종 데이터가 없습니다.")
 
     with tab2:
-        c_a, c_b = st.columns(2)
-        with c_a:
+        ca, cb = st.columns(2)
+        with ca:
             if "indsMclsNm" in df_all.columns:
                 st.markdown("#### 업종 중분류별 점포 수 TOP 15")
                 inds = df_all.groupby("indsMclsNm").size().reset_index(name="점포수").sort_values("점포수", ascending=False).head(15)
-                fig3 = px.bar(inds, x="점포수", y="indsMclsNm", orientation="h",
-                              text="점포수", color="점포수", color_continuous_scale="Teal")
+                fig3 = px.bar(inds, x="점포수", y="indsMclsNm", orientation="h", text="점포수",
+                              color="점포수", color_continuous_scale="Teal")
                 fig3.update_traces(textposition="outside")
-                fig3.update_layout(yaxis=dict(autorange="reversed"),
-                                   coloraxis_showscale=False, height=480, plot_bgcolor="white")
+                fig3.update_layout(yaxis=dict(autorange="reversed"), coloraxis_showscale=False, height=480, plot_bgcolor="white")
                 st.plotly_chart(fig3, use_container_width=True)
-        with c_b:
+        with cb:
             if "indsLclsNm" in df_all.columns:
                 st.markdown("#### 업종 대분류 비중")
                 lrg = df_all.groupby("indsLclsNm").size().reset_index(name="점포수")
-                fig4 = px.pie(lrg, names="indsLclsNm", values="점포수",
-                              color_discrete_sequence=px.colors.qualitative.Pastel)
+                fig4 = px.pie(lrg, names="indsLclsNm", values="점포수", color_discrete_sequence=px.colors.qualitative.Pastel)
                 fig4.update_traces(textposition="inside", textinfo="percent+label")
                 fig4.update_layout(height=480, showlegend=False)
                 st.plotly_chart(fig4, use_container_width=True)
-
         with st.expander("📋 상가 데이터 상위 200개"):
             cols = [c for c in ["bizesNm","indsLclsNm","indsMclsNm","adongNm","rdnAdr"] if c in df_all.columns]
             rename = {"bizesNm":"상호명","indsLclsNm":"대분류","indsMclsNm":"중분류","adongNm":"행정동","rdnAdr":"주소"}
@@ -265,38 +283,26 @@ else:
         st.markdown("### 🤖 AI 창업 상권 분석 리포트")
         st.caption("Claude AI가 실데이터를 해석해 창업 입지와 리스크를 분석합니다.")
 
-        dong_col = "adongNm" if "adongNm" in df_all.columns else None
-        top_districts_str = "데이터 없음"
-        if not df_target.empty and dong_col:
-            top5 = df_target.groupby(dong_col).size().sort_values(ascending=False).head(5)
-            top_districts_str = ", ".join([f"{k}({v}개)" for k, v in top5.items()])
-        industry_diversity = df_all["indsMclsNm"].nunique() if "indsMclsNm" in df_all.columns else 0
-
-        summary = {
-            "region": sido, "industry": industry_name,
-            "total_stores": len(df_all), "target_stores": len(df_target),
-            "concentration": concentration,
-            "top_districts": top_districts_str,
-            "industry_diversity": industry_diversity
-        }
-
-        if st.button("🚀 AI 분석 리포트 생성", type="primary"):
-            if not anthropic_key:
-                st.warning("사이드바에서 Anthropic API 키를 입력해주세요.")
-            else:
-                with st.spinner("Claude AI 분석 중..."):
-                    report = generate_ai_analysis(summary)
-                st.markdown(f'<div class="insight-box">{report}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
+        st.markdown(f"""
 **📊 기본 분석 요약**
-- **분석 지역**: {sido} | **관심 업종**: {industry_name}
-- **{industry_name} 비중**: {concentration:.1f}% ({len(df_target):,}개 / {len(df_all):,}개)
-- **밀집 행정동 TOP 5**: {top_districts_str}
-- **업종 다양성**: {industry_diversity}개 중분류
-
-> 💡 **AI 분석 리포트 생성** 버튼을 누르면 Claude AI가 블루오션 입지와 창업 리스크를 분석해드립니다.
+- **분석 지역**: {sido_saved} | **관심 업종**: {industry_saved}
+- **{industry_saved} 비중**: {concentration:.1f}% ({len(df_target):,}개 / {len(df_all):,}개)
+- **밀집 행정동 TOP 5**: {summary['top_districts']}
+- **업종 다양성**: {summary['industry_diversity']}개 중분류
 """)
+
+        # AI 리포트 이미 생성된 경우 바로 표시
+        if st.session_state.ai_report:
+            st.markdown(f'<div class="insight-box">{st.session_state.ai_report}</div>', unsafe_allow_html=True)
+        else:
+            if st.button("🚀 AI 분석 리포트 생성", type="primary"):
+                if not anthropic_key:
+                    st.warning("사이드바에서 Anthropic API 키를 입력해주세요.")
+                else:
+                    with st.spinner("Claude AI 분석 중..."):
+                        report = generate_ai_analysis(summary)
+                    st.session_state.ai_report = report
+                    st.markdown(f'<div class="insight-box">{report}</div>', unsafe_allow_html=True)
 
         st.divider()
         st.info("""
